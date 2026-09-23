@@ -44,6 +44,11 @@ class RefreshMeEvent extends AuthEvent {
   const RefreshMeEvent();
 }
 
+/// Cold start with no saved session.
+class NoSessionEvent extends AuthEvent {
+  const NoSessionEvent();
+}
+
 class LogoutEvent extends AuthEvent {
   const LogoutEvent();
 }

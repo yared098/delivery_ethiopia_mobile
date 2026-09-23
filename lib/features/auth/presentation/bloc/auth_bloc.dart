@@ -1,5 +1,11 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../../../../core/notifications/device_token_service.dart';
+import '../../../../core/notifications/push_service.dart';
+import '../../../../di/service_locator.dart';
 import '../../domain/usecases/get_me.dart';
+import '../../domain/usecases/logout.dart';
 import '../../domain/usecases/register_customer.dart';
 import '../../domain/usecases/request_otp.dart';
 import '../../domain/usecases/verify_otp.dart';
@@ -12,19 +18,25 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     required this.verifyOtp,
     required this.registerCustomer,
     required this.getMe,
+    required this.logout,
   }) : super(AuthInitial()) {
     on<RequestOtpEvent>(_onRequest);
     on<VerifyOtpEvent>(_onVerify);
     on<RegisterCustomerEvent>(_onRegister);
     on<RefreshMeEvent>(_onRefreshMe);
-    on<LogoutEvent>((_, emit) => emit(AuthUnauthenticated()));
+    on<LogoutEvent>(_onLogout);
+    on<NoSessionEvent>((_, emit) => emit(AuthUnauthenticated()));
   }
 
   final RequestOtp requestOtp;
   final VerifyOtp verifyOtp;
   final RegisterCustomer registerCustomer;
   final GetMe getMe;
+  final Logout logout;
 
+  // ─────────────────────────────────────────────
+  // REQUEST OTP
+  // ─────────────────────────────────────────────
   Future<void> _onRequest(RequestOtpEvent e, Emitter<AuthState> emit) async {
     emit(AuthLoading());
     final res = await requestOtp(e.phone);
@@ -34,12 +46,16 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     );
   }
 
+  // ─────────────────────────────────────────────
+  // VERIFY OTP
+  // ─────────────────────────────────────────────
   Future<void> _onVerify(VerifyOtpEvent e, Emitter<AuthState> emit) async {
     emit(AuthLoading());
     final res = await verifyOtp(phone: e.phone, code: e.code);
-    res.fold(
-      (l) => emit(AuthError(l.message)),
-      (r) {
+
+    await res.fold(
+      (l) async => emit(AuthError(l.message)),
+      (r) async {
         if (r.isRegistrationRequired) {
           emit(RegistrationRequired(
             registrationToken: r.registrationToken!,
@@ -47,11 +63,15 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
           ));
         } else {
           emit(AuthAuthenticated(r.session!.account));
+          await _uploadFcmToken();
         }
       },
     );
   }
 
+  // ─────────────────────────────────────────────
+  // REGISTER
+  // ─────────────────────────────────────────────
   Future<void> _onRegister(
     RegisterCustomerEvent e,
     Emitter<AuthState> emit,
@@ -65,26 +85,73 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
       defaultLat: e.defaultLat,
       defaultLng: e.defaultLng,
     );
-    res.fold(
-      (l) => emit(AuthError(l.message)),
-      (session) => emit(AuthAuthenticated(session.account)),
+    await res.fold(
+      (l) async => emit(AuthError(l.message)),
+      (session) async {
+        emit(AuthAuthenticated(session.account));
+        await _uploadFcmToken();
+      },
     );
   }
 
-  /// Silent refresh — do NOT emit AuthLoading (that would flash the login page).
-  /// Only log out on a genuine 401 (dead session). Network errors keep us where we are.
+  // ─────────────────────────────────────────────
+  // REFRESH ME
+  // ─────────────────────────────────────────────
   Future<void> _onRefreshMe(RefreshMeEvent e, Emitter<AuthState> emit) async {
     final res = await getMe();
-    res.fold(
-      (l) {
-        // 401 → the interceptor already tried refresh and failed.
-        // That's the only case where we're truly logged out.
+    await res.fold(
+      (l) async {
         if (l.statusCode == 401) {
           emit(AuthUnauthenticated());
         }
-        // Otherwise: silent fail, keep the current state
       },
-      (account) => emit(AuthAuthenticated(account)),
+      (account) async {
+        emit(AuthAuthenticated(account));
+        await _uploadFcmToken();
+      },
     );
+  }
+
+  // ─────────────────────────────────────────────
+  // LOGOUT
+  // ─────────────────────────────────────────────
+  Future<void> _onLogout(LogoutEvent e, Emitter<AuthState> emit) async {
+    // 1. Tell the server to detach this device from FCM.
+    try {
+      if (sl.isRegistered<PushService>() &&
+          sl.isRegistered<DeviceTokenService>()) {
+        final token = await sl<PushService>().getToken();
+        if (token != null && token.isNotEmpty) {
+          await sl<DeviceTokenService>().remove(token);
+        }
+      }
+    } catch (err) {
+      if (kDebugMode) debugPrint('🔔 server device-token remove failed: $err');
+    }
+
+    // 2. Invalidate the token locally.
+    try {
+      if (sl.isRegistered<PushService>()) {
+        await sl<PushService>().deleteToken();
+      }
+    } catch (err) {
+      if (kDebugMode) debugPrint('🔔 deleteToken on logout failed: $err');
+    }
+
+    // 3. Clear tokens + revoke refresh token.
+    await logout();
+    emit(AuthUnauthenticated());
+  }
+
+  // ─────────────────────────────────────────────
+  // Helper
+  // ─────────────────────────────────────────────
+  Future<void> _uploadFcmToken() async {
+    try {
+      if (!sl.isRegistered<PushService>()) return;
+      await sl<PushService>().refreshToken();
+    } catch (e) {
+      if (kDebugMode) debugPrint('🔔 refreshToken failed: $e');
+    }
   }
 }
