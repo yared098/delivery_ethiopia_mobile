@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -17,15 +18,30 @@ Future<void> main() async {
 
   await setupLocator(onLogout: onLogout);
 
-  // Only restore on TRUE cold start — not on every hot restart
   final bloc = sl<AuthBloc>();
   final storage = sl<SecureStorage>();
 
-  if (bloc.state is AuthInitial) {
-    if (await storage.hasSession) {
+  // Kick off session restore asynchronously (do NOT block runApp).
+  // The splash screen covers the UI while we decide.
+  Future<void>.microtask(() async {
+    try {
+      final has = await storage.hasSession;
+      if (kDebugMode) debugPrint('🔍 cold start hasSession=$has');
+
+      if (!has) {
+        // No tokens → go to login, splash is dismissed
+        bloc.add(const LogoutEvent());
+        return;
+      }
+
+      // We have tokens → try to fetch the account.
+      // If access is expired, the Dio interceptor auto-refreshes.
       bloc.add(const RefreshMeEvent());
+    } catch (e) {
+      if (kDebugMode) debugPrint('🔍 cold start failed: $e');
+      bloc.add(const LogoutEvent());
     }
-  }
+  });
 
   runApp(
     BlocProvider<AuthBloc>.value(

@@ -20,47 +20,53 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int _index = 0;
 
-  static const _tabs = <Widget>[
-    HomeTab(),
-    OrdersListPage(),
-    TrackingTab(),
-    ProfileTab(),
-  ];
+  void _goTo(int i) {
+    if (i == _index) return;
+    setState(() => _index = i);
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Rebuild the tab list each time so callbacks pick up the latest closure.
+    final tabs = <Widget>[
+      HomeTab(onNavigate: _goTo),
+      const OrdersListPage(),
+      const TrackingTab(),
+      const ProfileTab(),
+    ];
+
     return BlocListener<AuthBloc, AuthState>(
       listener: (context, state) {
-        // When the user logs out, pop back to the root so app.dart
-        // re-renders PhoneInputPage. Nothing else to do here.
         if (state is AuthUnauthenticated) {
           Navigator.of(context).popUntil((r) => r.isFirst);
         }
       },
       child: Scaffold(
-        body: IndexedStack(index: _index, children: _tabs),
+        body: IndexedStack(index: _index, children: tabs),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _index,
-          onDestinationSelected: (i) => setState(() => _index = i),
+          onDestinationSelected: _goTo,
+          labelBehavior:
+              NavigationDestinationLabelBehavior.onlyShowSelected,
           destinations: const [
             NavigationDestination(
               icon: Icon(Icons.home_outlined),
-              selectedIcon: Icon(Icons.home),
+              selectedIcon: Icon(Icons.home_rounded),
               label: 'Home',
             ),
             NavigationDestination(
               icon: Icon(Icons.receipt_long_outlined),
-              selectedIcon: Icon(Icons.receipt_long),
+              selectedIcon: Icon(Icons.receipt_long_rounded),
               label: 'Orders',
             ),
             NavigationDestination(
               icon: Icon(Icons.search_outlined),
-              selectedIcon: Icon(Icons.search),
+              selectedIcon: Icon(Icons.search_rounded),
               label: 'Track',
             ),
             NavigationDestination(
               icon: Icon(Icons.person_outline),
-              selectedIcon: Icon(Icons.person),
+              selectedIcon: Icon(Icons.person_rounded),
               label: 'Profile',
             ),
           ],

@@ -6,6 +6,8 @@ import '../../domain/entities/order.dart';
 import '../bloc/orders_bloc.dart';
 import '../bloc/orders_event.dart';
 import '../bloc/orders_state.dart';
+import '../widgets/order_status_badge.dart';
+import 'create_order_page.dart';
 import 'order_detail_page.dart';
 
 class OrdersListPage extends StatelessWidget {
@@ -13,9 +15,8 @@ class OrdersListPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // One bloc instance per page, but shared across the 3 tabs.
     return BlocProvider(
-      create: (_) => sl<OrdersBloc>()..add(const LoadOrdersEvent(type: 'all')),
+      create: (_) => sl<OrdersBloc>(),
       child: const _OrdersShell(),
     );
   }
@@ -32,16 +33,23 @@ class _OrdersShellState extends State<_OrdersShell>
     with SingleTickerProviderStateMixin {
   late final TabController _tabs;
 
+  static const _types = ['all', 'sent', 'received'];
+
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this);
+    _tabs = TabController(length: _types.length, vsync: this);
+    // Kick off only the first tab
+    context.read<OrdersBloc>().add(LoadOrdersEvent(type: _types.first));
     _tabs.addListener(() {
       if (_tabs.indexIsChanging) return;
-      const types = ['all', 'sent', 'received'];
-      context
-          .read<OrdersBloc>()
-          .add(LoadOrdersEvent(type: types[_tabs.index]));
+      final t = _types[_tabs.index];
+      final state = context.read<OrdersBloc>().state;
+      // Only fetch the first time we visit this tab
+      final hasData = state is OrdersLoaded && state.byType.containsKey(t);
+      if (!hasData) {
+        context.read<OrdersBloc>().add(LoadOrdersEvent(type: t));
+      }
     });
   }
 
@@ -67,217 +75,281 @@ class _OrdersShellState extends State<_OrdersShell>
       ),
       body: TabBarView(
         controller: _tabs,
-        children: const [
-          _OrdersList(),
-          _OrdersList(),
-          _OrdersList(),
-        ],
+        children: _types.map((t) => _OrdersTab(type: t)).toList(),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          final created = await Navigator.push<bool>(
+            context,
+            MaterialPageRoute(builder: (_) => const CreateOrderPage()),
+          );
+          if (created == true && context.mounted) {
+            context.read<OrdersBloc>().add(const LoadOrdersEvent(type: 'all'));
+          }
+        },
+        icon: const Icon(Icons.add),
+        label: const Text('New order'),
       ),
     );
   }
 }
 
-class _OrdersList extends StatelessWidget {
-  const _OrdersList();
+/// One tab — knows its own `type` so refresh works correctly.
+class _OrdersTab extends StatelessWidget {
+  const _OrdersTab({required this.type});
+  final String type;
 
   @override
   Widget build(BuildContext context) {
-    return BlocBuilder<OrdersBloc, OrdersState>(
+    return BlocSelector<OrdersBloc, OrdersState, OrdersState>(
+      selector: (s) => s,
       builder: (context, state) {
-        if (state is OrdersLoading || state is OrdersInitial) {
-          return const Center(child: CircularProgressIndicator());
+        // Loading only blocks us if we have no cached data for this tab yet.
+        final cached = state is OrdersLoaded ? state.forType(type) : null;
+        final isLoading =
+            state is OrdersLoading && (state.forType == type) && (cached == null);
+
+        if (isLoading) {
+          return const _SkeletonList();
         }
-        if (state is OrdersError) {
+
+        if (state is OrdersError && state.forType == type) {
           return _ErrorView(
             message: state.message,
             onRetry: () => context
                 .read<OrdersBloc>()
-                .add(const LoadOrdersEvent(type: 'all')),
+                .add(LoadOrdersEvent(type: type)),
           );
         }
-        if (state is OrdersLoaded) {
-          if (state.orders.isEmpty) {
-            return const _EmptyView();
-          }
-          return RefreshIndicator(
-            onRefresh: () async {
-              final controller =
-                  DefaultTabController.maybeOf(context);
-              // reload current tab
-              final type = _currentType(context);
+
+        if (cached == null) {
+          // Not loaded yet — kick off and show skeleton
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!context.mounted) return;
+            final s = context.read<OrdersBloc>().state;
+            final has = s is OrdersLoaded && s.byType.containsKey(type);
+            if (!has) {
               context.read<OrdersBloc>().add(LoadOrdersEvent(type: type));
-              // keep the unused variable out
-              controller?.index;
-            },
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: state.orders.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (_, i) =>
-                  _OrderTile(order: state.orders[i]),
-            ),
-          );
+            }
+          });
+          return const _SkeletonList();
         }
-        return const SizedBox.shrink();
+
+        if (cached.isEmpty) {
+          return _EmptyView(onRefresh: () async {
+            context.read<OrdersBloc>().add(LoadOrdersEvent(type: type));
+          });
+        }
+
+        return RefreshIndicator(
+          onRefresh: () async {
+            context.read<OrdersBloc>().add(LoadOrdersEvent(type: type));
+          },
+          child: ListView.builder(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+            itemCount: cached.length,
+            itemBuilder: (_, i) => _OrderCard(
+              order: cached[i],
+            ),
+          ),
+        );
       },
     );
   }
-
-  String _currentType(BuildContext context) {
-    final tabs = DefaultTabController.maybeOf(context);
-    switch (tabs?.index ?? 0) {
-      case 1:
-        return 'sent';
-      case 2:
-        return 'received';
-      default:
-        return 'all';
-    }
-  }
 }
 
-class _OrderTile extends StatelessWidget {
-  const _OrderTile({required this.order});
+/// Pretty card list item.
+class _OrderCard extends StatelessWidget {
+  const _OrderCard({required this.order});
   final DeliveryOrder order;
 
   @override
   Widget build(BuildContext context) {
-    final title = order.trackingNumber ?? order.id;
-    final subtitle =
-        '${order.sender.phone} → ${order.receiver.phone}';
-    return ListTile(
-      leading: CircleAvatar(
-        backgroundColor:
-            Theme.of(context).colorScheme.primaryContainer,
-        child: Icon(
-          _iconForStatus(order.status),
-          color: Theme.of(context).colorScheme.onPrimaryContainer,
-        ),
-      ),
-      title: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.w600),
-      ),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 2),
-          Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              _StatusChip(status: order.status),
-              const SizedBox(width: 8),
-              Text(
-                '${order.items.length} item(s)',
-                style: const TextStyle(fontSize: 12, color: Colors.black54),
-              ),
-            ],
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => OrderDetailPage(id: order.id),
+            ),
           ),
-        ],
-      ),
-      isThreeLine: true,
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => OrderDetailPage(id: order.id),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        order.trackingNumber ?? order.id,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                          letterSpacing: 0.4,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    OrderStatusBadge(status: order.status, compact: true),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                _Route(
+                  from: order.sender.name ?? order.sender.phone,
+                  to: order.receiver.name ?? order.receiver.phone,
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    _pill(Icons.inventory_2_outlined,
+                        '${order.items.length} item${order.items.length == 1 ? '' : 's'}'),
+                    if (order.totalWeightKg > 0) ...[
+                      const SizedBox(width: 8),
+                      _pill(Icons.scale_outlined,
+                          '${order.totalWeightKg.toStringAsFixed(1)} kg'),
+                    ],
+                    const Spacer(),
+                    Text(
+                      _amountLabel(order),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 
-  IconData _iconForStatus(OrderStatus s) {
-    switch (s) {
-      case OrderStatus.delivered:
-        return Icons.check_circle_outline;
-      case OrderStatus.cancelled:
-      case OrderStatus.failed:
-      case OrderStatus.returned:
-        return Icons.cancel_outlined;
-      case OrderStatus.inTransit:
-      case OrderStatus.outForDelivery:
-      case OrderStatus.pickedUp:
-        return Icons.local_shipping_outlined;
-      case OrderStatus.pendingPayment:
-      case OrderStatus.paid:
-        return Icons.payments_outlined;
-      case OrderStatus.assigned:
-        return Icons.person_pin_circle_outlined;
-      default:
-        return Icons.inventory_2_outlined;
+  String _amountLabel(DeliveryOrder order) {
+    if (order.codAmount > 0) {
+      return 'COD ${order.codAmount.toStringAsFixed(0)} ETB';
     }
+    if (order.deliveryFee > 0) {
+      return '${order.deliveryFee.toStringAsFixed(0)} ETB';
+    }
+    return '';
   }
+
+  Widget _pill(IconData icon, String text) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.black12),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 12),
+            const SizedBox(width: 4),
+            Text(text, style: const TextStyle(fontSize: 11)),
+          ],
+        ),
+      );
 }
 
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
-  final OrderStatus status;
+class _Route extends StatelessWidget {
+  const _Route({required this.from, required this.to});
+  final String from;
+  final String to;
 
   @override
   Widget build(BuildContext context) {
-    final (bg, fg) = _colors(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        status.label,
-        style: TextStyle(fontSize: 11, color: fg, fontWeight: FontWeight.w600),
-      ),
+    return Row(
+      children: [
+        const Icon(Icons.trip_origin, size: 12, color: Colors.green),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(from,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12)),
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 6),
+          child: Icon(Icons.arrow_right_alt, size: 16, color: Colors.black38),
+        ),
+        const Icon(Icons.place, size: 12, color: Colors.orange),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(to,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12)),
+        ),
+      ],
     );
   }
+}
 
-  (Color, Color) _colors(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    switch (status) {
-      case OrderStatus.delivered:
-        return (Colors.green.shade100, Colors.green.shade800);
-      case OrderStatus.cancelled:
-      case OrderStatus.failed:
-      case OrderStatus.returned:
-        return (Colors.red.shade100, Colors.red.shade800);
-      case OrderStatus.inTransit:
-      case OrderStatus.outForDelivery:
-      case OrderStatus.pickedUp:
-      case OrderStatus.assigned:
-        return (Colors.blue.shade100, Colors.blue.shade800);
-      case OrderStatus.pendingPayment:
-        return (Colors.orange.shade100, Colors.orange.shade800);
-      default:
-        return (scheme.surfaceContainerHighest, scheme.onSurface);
-    }
+/// Skeleton list — matches the card shape so the swap is seamless.
+class _SkeletonList extends StatelessWidget {
+  const _SkeletonList();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+      itemCount: 6,
+      itemBuilder: (_, __) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Container(
+          height: 110,
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+    );
   }
 }
 
 class _EmptyView extends StatelessWidget {
-  const _EmptyView();
+  const _EmptyView({required this.onRefresh});
+  final Future<void> Function() onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      // Allows pull-to-refresh even when empty
-      physics: const AlwaysScrollableScrollPhysics(),
-      children: [
-        const SizedBox(height: 120),
-        const Icon(Icons.inbox_outlined, size: 64, color: Colors.black26),
-        const SizedBox(height: 12),
-        const Center(
-          child: Text(
-            'No orders yet',
-            style: TextStyle(fontSize: 16, color: Colors.black54),
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: const [
+          SizedBox(height: 120),
+          Icon(Icons.inbox_outlined, size: 64, color: Colors.black26),
+          SizedBox(height: 12),
+          Center(
+            child: Text(
+              'No orders yet',
+              style: TextStyle(fontSize: 16, color: Colors.black54),
+            ),
           ),
-        ),
-        const SizedBox(height: 4),
-        const Center(
-          child: Text(
-            'Your deliveries will appear here.',
-            style: TextStyle(color: Colors.black45),
+          SizedBox(height: 4),
+          Center(
+            child: Text(
+              'Your deliveries will appear here.',
+              style: TextStyle(color: Colors.black45),
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

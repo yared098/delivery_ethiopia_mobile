@@ -8,13 +8,27 @@ abstract class OrdersState extends Equatable {
 }
 
 class OrdersInitial extends OrdersState {}
-class OrdersLoading extends OrdersState {}
 
-class OrdersLoaded extends OrdersState {
-  const OrdersLoaded(this.orders);
-  final List<DeliveryOrder> orders;
+/// Loading only for a specific tab (keeps other tabs' cached data on screen).
+class OrdersLoading extends OrdersState {
+  const OrdersLoading({this.forType = 'all'});
+  final String forType;
   @override
-  List<Object?> get props => [orders];
+  List<Object?> get props => [forType];
+}
+
+/// Data keyed by tab type so switching tabs is instant.
+class OrdersLoaded extends OrdersState {
+  const OrdersLoaded(this.byType);
+  final Map<String, List<DeliveryOrder>> byType;
+
+  List<DeliveryOrder> forType(String type) => byType[type] ?? const [];
+
+  OrdersLoaded copyWithType(String type, List<DeliveryOrder> orders) =>
+      OrdersLoaded({...byType, type: orders});
+
+  @override
+  List<Object?> get props => [byType];
 }
 
 class OrderDetailLoaded extends OrdersState {
@@ -25,8 +39,9 @@ class OrderDetailLoaded extends OrdersState {
 }
 
 class OrdersError extends OrdersState {
-  const OrdersError(this.message);
+  const OrdersError(this.message, {this.forType});
   final String message;
+  final String? forType;
   @override
-  List<Object?> get props => [message];
+  List<Object?> get props => [message, forType];
 }

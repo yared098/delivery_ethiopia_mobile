@@ -16,11 +16,24 @@ class OrdersBloc extends Bloc<OrdersEvent, OrdersState> {
   final GetOrderDetail getOrderDetail;
 
   Future<void> _onList(LoadOrdersEvent e, Emitter<OrdersState> emit) async {
-    emit(OrdersLoading());
+    final current = state;
+    // Show the loading state for that tab only. If we already have data for
+    // that tab, keep it on screen (background refresh) — no spinner flash.
+    final cached = current is OrdersLoaded ? current.forType(e.type) : null;
+    if (cached == null || cached.isEmpty) {
+      emit(OrdersLoading(forType: e.type));
+    }
+
     final res = await listOrders(type: e.type);
     res.fold(
-      (l) => emit(OrdersError(l.message)),
-      (orders) => emit(OrdersLoaded(orders)),
+      (l) => emit(OrdersError(l.message, forType: e.type)),
+      (orders) {
+        final map = current is OrdersLoaded
+            ? Map<String, List<DeliveryOrder>>.from(current.byType)
+            : <String, List<DeliveryOrder>>{};
+        map[e.type] = orders;
+        emit(OrdersLoaded(map));
+      },
     );
   }
 
@@ -28,7 +41,7 @@ class OrdersBloc extends Bloc<OrdersEvent, OrdersState> {
     LoadOrderDetailEvent e,
     Emitter<OrdersState> emit,
   ) async {
-    emit(OrdersLoading());
+    emit(OrdersLoading(forType: '__detail__'));
     final res = await getOrderDetail(e.id);
     res.fold(
       (l) => emit(OrdersError(l.message)),

@@ -35,7 +35,8 @@ class _CompleteProfilePageState extends State<CompleteProfilePage> {
     final res = await sl<UpdateProfile>()(
       name: _name.text.trim(),
       email: _email.text.trim().isEmpty ? null : _email.text.trim(),
-      defaultAddress: _address.text.trim().isEmpty ? null : _address.text.trim(),
+      defaultAddress:
+          _address.text.trim().isEmpty ? null : _address.text.trim(),
     );
 
     if (!mounted) return;
