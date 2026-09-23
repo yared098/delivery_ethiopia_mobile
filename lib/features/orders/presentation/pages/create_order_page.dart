@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:geocoding/geocoding.dart' as geo;
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../../di/service_locator.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -9,6 +12,7 @@ import '../../domain/entities/order.dart';
 import '../bloc/create_order_bloc.dart';
 import '../bloc/create_order_event.dart';
 import '../bloc/create_order_state.dart';
+import 'pick_location_page.dart';
 
 class CreateOrderPage extends StatelessWidget {
   const CreateOrderPage({super.key});
@@ -57,8 +61,13 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
   final _codAmount = TextEditingController(text: '0');
   bool _sendReceiverLink = false;
 
+  // Locations
+  final ValueNotifier<LatLng?> _senderLocation = ValueNotifier(null);
+  final ValueNotifier<LatLng?> _receiverLocation = ValueNotifier(null);
+  bool _senderDetecting = true;
+
   bool _dirty = false;
-  bool _submitted = false; // ← guard so PopScope doesn't double-pop after success
+  bool _submitted = false;
 
   @override
   void initState() {
@@ -84,6 +93,37 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     ]) {
       c.addListener(_markDirty);
     }
+
+    // 🔑 Auto-detect the sender location from GPS (or account default).
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Prefer the account default if it's set
+      if (account?.defaultLat != null && account?.defaultLng != null) {
+        _senderLocation.value =
+            LatLng(account!.defaultLat!, account.defaultLng!);
+        _senderDetecting = false;
+        if (mounted) setState(() {});
+        return;
+      }
+
+      // Otherwise try the GPS
+      final detected = await _detectCurrentLocation();
+      if (!mounted) return;
+      _senderDetecting = false;
+      if (detected != null) {
+        _senderLocation.value = detected;
+        // Auto-fill the address if empty
+        if (_senderAddress.text.trim().isEmpty) {
+          final addr = await _reverseGeocode(detected);
+          if (addr != null && addr.isNotEmpty && mounted) {
+            _senderAddress.text = addr;
+          }
+        }
+      } else {
+        // Silently fail — user can still pick manually
+        _showSnack('Could not read GPS. Tap "Pick on map" under Sender.');
+      }
+      if (mounted) setState(() {});
+    });
   }
 
   void _markDirty() {
@@ -99,16 +139,83 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     _receiverName.dispose();
     _receiverPhone.dispose();
     _receiverAddress.dispose();
-    // FIX #3: iterate a copy so removeAt(i) inside a loop doesn't skip
     for (final item in List<_ItemForm>.from(_items)) {
       item.dispose();
     }
     _items.clear();
     _codAmount.dispose();
+    _senderLocation.dispose();
+    _receiverLocation.dispose();
     super.dispose();
   }
 
   static final _phoneRe = RegExp(r'^(\+?251|0)?[79]\d{8}$');
+
+  // ── GPS helpers ──
+  Future<LatLng?> _detectCurrentLocation() async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        debugPrint('📍 location service disabled');
+        return null;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        debugPrint('📍 permission denied');
+        return null;
+      }
+
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+      debugPrint('📍 got position ${pos.latitude}, ${pos.longitude}');
+      return LatLng(pos.latitude, pos.longitude);
+    } catch (e) {
+      debugPrint('📍 position failed: $e');
+      // Fall back to last known
+      try {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null) {
+          debugPrint('📍 fallback last-known ${last.latitude}, ${last.longitude}');
+          return LatLng(last.latitude, last.longitude);
+        }
+      } catch (_) {}
+      return null;
+    }
+  }
+
+  Future<String?> _reverseGeocode(LatLng p) async {
+    try {
+      final placemarks =
+          await geo.placemarkFromCoordinates(p.latitude, p.longitude);
+      if (placemarks.isEmpty) return null;
+      final pl = placemarks.first;
+      final parts = <String?>[
+        pl.name,
+        pl.street,
+        pl.subLocality,
+        pl.locality,
+      ].where((s) => s != null && s.trim().isNotEmpty).toList();
+      return parts.isEmpty ? null : parts.join(', ');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+      );
+  }
 
   // ── Live price estimate ──
   double get _estimatedWeight => _items.fold(0.0, (sum, i) {
@@ -125,7 +232,6 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     return base + (w * perKg);
   }
 
-  // FIX #5 + #8: scroll the first invalid field into view
   Future<void> _scrollToFirstError() async {
     final ctx = _senderKey.currentContext ??
         _receiverKey.currentContext ??
@@ -139,27 +245,37 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
         alignment: 0.05,
       );
     }
-    if (mounted) {
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Please fix the highlighted fields'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-    }
+    _showSnack('Please fix the highlighted fields');
   }
 
   void _submit() {
     if (!(_formKey.currentState?.validate() ?? false)) {
-      // FIX #8 — actually tell the user
       _scrollToFirstError();
       HapticFeedback.mediumImpact();
       return;
     }
+
+    // Sender location required
+    if (_senderLocation.value == null) {
+      HapticFeedback.mediumImpact();
+      _scrollToFirstError();
+      _showSnack('Waiting for sender location — or pick it on the map');
+      return;
+    }
+
+    // Receiver location required
+    if (_receiverLocation.value == null) {
+      HapticFeedback.mediumImpact();
+      _scrollToFirstError();
+      _showSnack('Please pick the receiver location on the map');
+      return;
+    }
+
     FocusScope.of(context).unfocus();
     HapticFeedback.selectionClick();
+
+    final senderLoc = _senderLocation.value!;
+    final receiverLoc = _receiverLocation.value!;
 
     final sender = OrderParty(
       name: _senderName.text.trim(),
@@ -167,7 +283,10 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
       address: _senderAddress.text.trim().isEmpty
           ? null
           : _senderAddress.text.trim(),
+      lat: senderLoc.latitude,
+      lng: senderLoc.longitude,
     );
+
     final receiver = OrderParty(
       name: _receiverName.text.trim().isEmpty
           ? null
@@ -176,6 +295,8 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
       address: _receiverAddress.text.trim().isEmpty
           ? null
           : _receiverAddress.text.trim(),
+      lat: receiverLoc.latitude,
+      lng: receiverLoc.longitude,
     );
 
     final items = _items.map((i) => i.toOrderItem()).toList();
@@ -220,20 +341,11 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     return BlocConsumer<CreateOrderBloc, CreateOrderState>(
       listener: (context, state) {
         if (state is CreateOrderSuccess) {
-          // FIX #2: mark as submitted so PopScope won't intercept this pop
           _submitted = true;
           Navigator.of(context).pop(state.order.id);
         } else if (state is CreateOrderError) {
           HapticFeedback.mediumImpact();
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              SnackBar(
-                content: Text(state.message),
-                behavior: SnackBarBehavior.floating,
-                duration: const Duration(seconds: 4),
-              ),
-            );
+          _showSnack(state.message);
         }
       },
       builder: (context, state) {
@@ -261,12 +373,11 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
               ],
             ),
             body: SafeArea(
-              bottom: false, // we draw our own bottom bar
+              bottom: false,
               child: Form(
                 key: _formKey,
                 child: ListView(
                   controller: _scroll,
-                  // FIX #6: reserve room for the sticky bar
                   padding: EdgeInsets.fromLTRB(
                     16,
                     8,
@@ -274,37 +385,74 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                     160 + MediaQuery.of(context).padding.bottom,
                   ),
                   children: [
+                    // ── Sender ──
                     _Section(
                       key: _senderKey,
                       icon: Icons.person_pin_circle_outlined,
                       title: 'Sender',
                       subtitle: 'Who is sending the package',
-                      child: _partyFields(
-                        name: _senderName,
-                        phone: _senderPhone,
-                        address: _senderAddress,
-                        nameLabel: 'Sender name *',
-                        enabled: !submitting,
-                        onChanged: _markDirty,
+                      child: Column(
+                        children: [
+                          _partyFields(
+                            name: _senderName,
+                            phone: _senderPhone,
+                            address: _senderAddress,
+                            nameLabel: 'Sender name *',
+                            enabled: !submitting,
+                            onChanged: _markDirty,
+                          ),
+                          const SizedBox(height: 12),
+                          _LocationRow(
+                            location: _senderLocation,
+                            detecting: _senderDetecting,
+                            enabled: !submitting,
+                            title: 'Sender location',
+                            onPick: () => _openMapPicker(
+                              target: _senderLocation,
+                              addressCtl: _senderAddress,
+                              title: 'Pick sender location',
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 20),
+
+                    // ── Receiver ──
                     _Section(
                       key: _receiverKey,
                       icon: Icons.person_pin_outlined,
                       title: 'Receiver',
                       subtitle: 'Where the package is going',
-                      child: _partyFields(
-                        name: _receiverName,
-                        phone: _receiverPhone,
-                        address: _receiverAddress,
-                        nameLabel: 'Receiver name (optional)',
-                        nameRequired: false,
-                        enabled: !submitting,
-                        onChanged: _markDirty,
+                      child: Column(
+                        children: [
+                          _partyFields(
+                            name: _receiverName,
+                            phone: _receiverPhone,
+                            address: _receiverAddress,
+                            nameLabel: 'Receiver name (optional)',
+                            nameRequired: false,
+                            enabled: !submitting,
+                            onChanged: _markDirty,
+                          ),
+                          const SizedBox(height: 12),
+                          _LocationRow(
+                            location: _receiverLocation,
+                            detecting: false,
+                            enabled: !submitting,
+                            title: 'Receiver location',
+                            onPick: () => _openMapPicker(
+                              target: _receiverLocation,
+                              addressCtl: _receiverAddress,
+                              title: 'Pick receiver location',
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 20),
+
+                    // ── Items ──
                     _Section(
                       key: _itemsKey,
                       icon: Icons.inventory_2_outlined,
@@ -349,6 +497,8 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                       ),
                     ),
                     const SizedBox(height: 20),
+
+                    // ── Payment ──
                     _Section(
                       key: _paymentKey,
                       icon: Icons.payments_outlined,
@@ -364,7 +514,6 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                         enabled: !submitting,
                         keyboardType:
                             const TextInputType.numberWithOptions(decimal: true),
-                        // FIX #9: reject double dots
                         inputFormatters: [
                           FilteringTextInputFormatter.allow(
                               RegExp(r'^\d*\.?\d{0,2}')),
@@ -384,6 +533,8 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                       ),
                     ],
                     const SizedBox(height: 20),
+
+                    // ── Options ──
                     _Section(
                       icon: Icons.tune,
                       title: 'Options',
@@ -416,6 +567,30 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
         );
       },
     );
+  }
+
+  Future<void> _openMapPicker({
+    required ValueNotifier<LatLng?> target,
+    required TextEditingController addressCtl,
+    required String title,
+  }) async {
+    final current = target.value;
+    final result = await Navigator.push<PickedLocation>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PickLocationPage(
+          initialLat: current?.latitude,
+          initialLng: current?.longitude,
+          title: title,
+        ),
+      ),
+    );
+    if (result == null) return;
+    target.value = LatLng(result.lat, result.lng);
+    if (result.address.isNotEmpty) {
+      addressCtl.text = result.address;
+    }
+    _markDirty();
   }
 
   Widget _partyFields({
@@ -510,6 +685,99 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Location row (auto-detect indicator + pick-on-map button)
+// ═══════════════════════════════════════════════════════════════
+class _LocationRow extends StatelessWidget {
+  const _LocationRow({
+    required this.location,
+    required this.detecting,
+    required this.enabled,
+    required this.title,
+    required this.onPick,
+  });
+
+  final ValueNotifier<LatLng?> location;
+  final bool detecting;
+  final bool enabled;
+  final String title;
+  final VoidCallback onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ValueListenableBuilder<LatLng?>(
+      valueListenable: location,
+      builder: (context, latLng, _) {
+        final has = latLng != null;
+        final showDetecting = !has && detecting;
+
+        return InkWell(
+          onTap: enabled ? onPick : null,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: has ? scheme.primary : scheme.outlineVariant,
+                width: has ? 1.6 : 1,
+              ),
+            ),
+            child: Row(
+              children: [
+                if (showDetecting)
+                  const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                  )
+                else
+                  Icon(
+                    has ? Icons.place : Icons.add_location_alt_outlined,
+                    color: has ? scheme.primary : Colors.black54,
+                  ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        showDetecting
+                            ? 'Detecting $title…'
+                            : has
+                                ? '$title set'
+                                : 'Pick $title on map *',
+                        style: TextStyle(
+                          fontWeight: has ? FontWeight.w700 : FontWeight.w500,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        has
+                            ? '${latLng!.latitude.toStringAsFixed(5)}, ${latLng.longitude.toStringAsFixed(5)}'
+                            : showDetecting
+                                ? 'Using your phone’s GPS'
+                                : 'Required for accurate pricing & delivery',
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.black54),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Section wrapper
 // ═══════════════════════════════════════════════════════════════
 class _Section extends StatelessWidget {
@@ -573,8 +841,7 @@ class _Section extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Item card (FIX #7: drop the pointless _open state, use ExpansionTile
-//          but with `maintainState: true` and `initiallyExpanded: true`)
+// Item card
 // ═══════════════════════════════════════════════════════════════
 class _ItemCard extends StatelessWidget {
   const _ItemCard({
@@ -691,7 +958,6 @@ class _ItemCard extends StatelessWidget {
                       keyboardType: const TextInputType.numberWithOptions(
                           decimal: true),
                       textInputAction: TextInputAction.next,
-                      // FIX #9: proper decimal input
                       inputFormatters: [
                         FilteringTextInputFormatter.allow(
                             RegExp(r'^\d*\.?\d{0,2}')),
@@ -787,8 +1053,7 @@ class _ItemCard extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Sticky bottom bar — now uses bottomNavigationBar slot
-// (FIX #6: no longer overlaps the last section)
+// Sticky bottom bar
 // ═══════════════════════════════════════════════════════════════
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
