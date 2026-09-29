@@ -1,3 +1,4 @@
+import 'package:deliver_ethiopia/features/auth/domain/usecases/account_kind.dart';
 import 'package:equatable/equatable.dart';
 import '../../domain/entities/account.dart';
 
@@ -8,6 +9,7 @@ abstract class AuthState extends Equatable {
 }
 
 class AuthInitial extends AuthState {}
+
 class AuthLoading extends AuthState {}
 
 class OtpSent extends AuthState {
@@ -17,7 +19,6 @@ class OtpSent extends AuthState {
   List<Object?> get props => [phone];
 }
 
-/// Verify passed but the phone is new — the UI must show the register form.
 class RegistrationRequired extends AuthState {
   const RegistrationRequired({
     required this.registrationToken,
@@ -30,10 +31,15 @@ class RegistrationRequired extends AuthState {
 }
 
 class AuthAuthenticated extends AuthState {
-  const AuthAuthenticated(this.account);
+  const AuthAuthenticated(
+    this.account, [
+    this.kind = AccountKind.customer,
+  ]);
   final Account account;
+  final AccountKind kind;
+
   @override
-  List<Object?> get props => [account];
+  List<Object?> get props => [account, kind];
 }
 
 class AuthUnauthenticated extends AuthState {}

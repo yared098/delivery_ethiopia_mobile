@@ -11,6 +11,11 @@ import 'features/auth/presentation/bloc/auth_bloc.dart';
 import 'features/auth/presentation/bloc/auth_event.dart';
 import 'firebase_options.dart';
 
+// ── Repositories exposed to the widget tree via RepositoryProvider ──
+import 'features/auth/domain/repositories/auth_repository.dart';
+import 'features/courier/domain/repositories/courier_repository.dart';
+import 'features/orders/domain/repositories/orders_repository.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -59,9 +64,21 @@ Future<void> main() async {
   });
 
   runApp(
-    BlocProvider<AuthBloc>.value(
-      value: bloc,
-      child: const DeliverEthiopiaApp(),
+    MultiRepositoryProvider(
+      providers: [
+        // Expose GetIt-registered repositories as InheritedWidgets so that
+        // any descendant (including routes pushed by the root Navigator) can
+        // call `RepositoryProvider.of<T>(context)`.
+        RepositoryProvider<AuthRepository>.value(value: sl<AuthRepository>()),
+        RepositoryProvider<CourierRepository>.value(
+            value: sl<CourierRepository>()),
+        RepositoryProvider<OrdersRepository>.value(
+            value: sl<OrdersRepository>()),
+      ],
+      child: BlocProvider<AuthBloc>.value(
+        value: bloc,
+        child: const DeliverEthiopiaApp(),
+      ),
     ),
   );
 }

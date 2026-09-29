@@ -1,3 +1,7 @@
+import 'package:deliver_ethiopia/features/auth/domain/usecases/account_kind.dart';
+import 'package:deliver_ethiopia/features/courier/data/datasources/courier_remote_datasource.dart';
+import 'package:deliver_ethiopia/features/courier/data/repositories/courier_repository_impl.dart';
+import 'package:deliver_ethiopia/features/courier/domain/repositories/courier_repository.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:get_it/get_it.dart';
@@ -65,6 +69,16 @@ Future<void> setupLocator({required Future<void> Function() onLogout}) async {
   sl.registerLazySingleton(() => GetMe(sl<AuthRepository>()));
   sl.registerLazySingleton(() => Logout(sl<AuthRepository>()));
 
+  // sl.registerLazySingleton(
+  //   () => AuthBloc(
+  //     requestOtp: sl<RequestOtp>(),
+  //     verifyOtp: sl<VerifyOtp>(),
+  //     registerCustomer: sl<RegisterCustomer>(),
+  //     getMe: sl<GetMe>(),
+  //     logout: sl<Logout>(),
+  //   ),
+  // );
+
   sl.registerLazySingleton(
     () => AuthBloc(
       requestOtp: sl<RequestOtp>(),
@@ -79,22 +93,41 @@ Future<void> setupLocator({required Future<void> Function() onLogout}) async {
   sl.registerLazySingleton(() => UpdateProfile(sl<AuthRepository>()));
 
   // ── Push notifications ──
+  // sl.registerLazySingleton<PushService>(
+  //   () => PushService(
+  //     onToken: (token) async {
+  //       // Only upload the token when a customer is logged in.
+  //       final auth = sl<AuthBloc>().state;
+  //       if (auth is! AuthAuthenticated) {
+  //         if (kDebugMode) {
+  //           debugPrint('🔔 no session — skipping token upload');
+  //         }
+  //         return;
+  //       }
+  //       await sl<DeviceTokenService>().register(token);
+  //     },
+  //   ),
+  // );
+
   sl.registerLazySingleton<PushService>(
     () => PushService(
       onToken: (token) async {
-        // Only upload the token when a customer is logged in.
         final auth = sl<AuthBloc>().state;
         if (auth is! AuthAuthenticated) {
-          if (kDebugMode) {
-            debugPrint('🔔 no session — skipping token upload');
-          }
+          if (kDebugMode) debugPrint('🔔 no session — skipping token upload');
           return;
         }
+
+        // Make sure DeviceTokenService uses the right endpoint
+        final account = auth.kind == AccountKind.courier
+            ? DeviceAccount.courier
+            : DeviceAccount.customer;
+        sl<DeviceTokenService>().setAccount(account);
+
         await sl<DeviceTokenService>().register(token);
       },
     ),
   );
-
   // ── Orders ──
   sl.registerLazySingleton<OrdersRemoteDataSource>(
     () => OrdersRemoteDataSource(sl<DioClient>().dio),
@@ -114,5 +147,15 @@ Future<void> setupLocator({required Future<void> Function() onLogout}) async {
   );
   sl.registerFactory(
     () => CreateOrderBloc(createOrder: sl<CreateOrder>()),
+  );
+
+  // ══════════════════════════════════════════════════
+  // COURIER
+  // ══════════════════════════════════════════════════
+  sl.registerLazySingleton<CourierRemoteDataSource>(
+    () => CourierRemoteDataSource(sl<DioClient>().dio),
+  );
+  sl.registerLazySingleton<CourierRepository>(
+    () => CourierRepositoryImpl(sl<CourierRemoteDataSource>()),
   );
 }

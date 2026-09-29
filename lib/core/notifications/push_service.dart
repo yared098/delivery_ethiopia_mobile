@@ -8,10 +8,6 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../router/app_router.dart';
 import '../router/app_routes.dart';
 
-// ═══════════════════════════════════════════════════════════════
-// Top-level handlers (required by plugins)
-// ═══════════════════════════════════════════════════════════════
-
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   debugPrint('🔔 [bg] message: ${message.messageId} data=${message.data}');
@@ -22,10 +18,6 @@ void onDidReceiveBackgroundNotificationResponse(NotificationResponse response) {
   debugPrint('🔔 [bg tap] payload=${response.payload}');
 }
 
-// ═══════════════════════════════════════════════════════════════
-// PushService
-// ═══════════════════════════════════════════════════════════════
-
 class PushService {
   PushService({required this.onToken});
 
@@ -35,17 +27,26 @@ class PushService {
   final FlutterLocalNotificationsPlugin _local =
       FlutterLocalNotificationsPlugin();
   StreamSubscription<String>? _tokenSub;
-  String? _lastToken;                                       // ← ADD
+  String? _lastToken;
+
+  // ── NEW guards ──
+  bool _deleting = false;
+  bool _loggingOut = false;
 
   static const String _channelId = 'high_importance_channel';
   static const String _channelName = 'High importance';
   static const String _channelDesc = 'Delivery and order updates.';
 
+  /// Called by AuthBloc before/after logout.
+  void setLoggingOut(bool v) {
+    _loggingOut = v;
+    if (kDebugMode) debugPrint('🔔 loggingOut=$v');
+  }
+
   Future<void> initialize() async {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
-    final NotificationSettings settings =
-        await _messaging.requestPermission(
+    final NotificationSettings settings = await _messaging.requestPermission(
       alert: true,
       badge: true,
       sound: true,
@@ -60,8 +61,8 @@ class PushService {
       playSound: true,
     );
 
-    final AndroidFlutterLocalNotificationsPlugin? androidPlugin = _local
-        .resolvePlatformSpecificImplementation<
+    final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
+        _local.resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
     await androidPlugin?.createNotificationChannel(channel);
 
@@ -97,19 +98,24 @@ class PushService {
     );
 
     await _fetchAndSendToken();
+
     _tokenSub = _messaging.onTokenRefresh.listen((String t) async {
+      if (_loggingOut) {
+        if (kDebugMode) debugPrint('🔔 token rotated — ignored (logging out)');
+        return;
+      }
       debugPrint('🔔 token rotated');
-      _lastToken = t;                                       // ← ADD
+      _lastToken = t;
       await _safeSend(t);
     });
   }
 
   Future<void> refreshToken() async {
+    if (_loggingOut) return; // ← skip during logout
     await _fetchAndSendToken();
   }
 
-  /// Returns the current FCM token (cached, or fetched fresh).   // ← ADD
-  Future<String?> getToken() async {                             // ← ADD
+  Future<String?> getToken() async {
     try {
       final t = await _messaging.getToken();
       if (t != null) _lastToken = t;
@@ -117,14 +123,14 @@ class PushService {
     } catch (_) {
       return _lastToken;
     }
-  }                                                              // ← ADD
+  }
 
   Future<void> _fetchAndSendToken() async {
     try {
       final String? token = await _messaging.getToken();
       debugPrint('🔔 FCM token: $token');
       if (token != null) {
-        _lastToken = token;                                   // ← ADD
+        _lastToken = token;
         await _safeSend(token);
       }
     } catch (e) {
@@ -133,6 +139,7 @@ class PushService {
   }
 
   Future<void> _safeSend(String token) async {
+    if (_loggingOut) return; // ← don't upload during logout
     try {
       await onToken(token);
     } catch (e) {
@@ -218,12 +225,21 @@ class PushService {
   }
 
   Future<void> deleteToken() async {
+    if (_deleting) return; // ← prevent double-call
+    _deleting = true;
     try {
       await _messaging.deleteToken();
-      _lastToken = null;                                     // ← ADD (clear cache)
+      _lastToken = null;
       debugPrint('🔔 token deleted');
     } catch (e) {
-      debugPrint('🔔 deleteToken failed: $e');
+      final msg = e.toString();
+      if (msg.contains('QUOTA_EXCEEDED')) {
+        debugPrint('🔔 deleteToken skipped (quota)');
+      } else {
+        debugPrint('🔔 deleteToken failed: $e');
+      }
+    } finally {
+      _deleting = false;
     }
   }
 

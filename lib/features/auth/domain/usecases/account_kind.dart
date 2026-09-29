@@ -1,0 +1,1 @@
+enum AccountKind { customer, courier }

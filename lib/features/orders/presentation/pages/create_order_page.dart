@@ -78,8 +78,7 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
 
     _senderName = TextEditingController(text: account?.name ?? '');
     _senderPhone = TextEditingController(text: account?.phone ?? '');
-    _senderAddress =
-        TextEditingController(text: account?.defaultAddress ?? '');
+    _senderAddress = TextEditingController(text: account?.defaultAddress ?? '');
 
     _receiverName = TextEditingController();
     _receiverPhone = TextEditingController();
@@ -96,7 +95,6 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
 
     // 🔑 Auto-detect the sender location from GPS (or account default).
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      // Prefer the account default if it's set
       if (account?.defaultLat != null && account?.defaultLng != null) {
         _senderLocation.value =
             LatLng(account!.defaultLat!, account.defaultLng!);
@@ -105,13 +103,11 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
         return;
       }
 
-      // Otherwise try the GPS
       final detected = await _detectCurrentLocation();
       if (!mounted) return;
       _senderDetecting = false;
       if (detected != null) {
         _senderLocation.value = detected;
-        // Auto-fill the address if empty
         if (_senderAddress.text.trim().isEmpty) {
           final addr = await _reverseGeocode(detected);
           if (addr != null && addr.isNotEmpty && mounted) {
@@ -119,7 +115,6 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
           }
         }
       } else {
-        // Silently fail — user can still pick manually
         _showSnack('Could not read GPS. Tap "Pick on map" under Sender.');
       }
       if (mounted) setState(() {});
@@ -178,11 +173,11 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
       return LatLng(pos.latitude, pos.longitude);
     } catch (e) {
       debugPrint('📍 position failed: $e');
-      // Fall back to last known
       try {
         final last = await Geolocator.getLastKnownPosition();
         if (last != null) {
-          debugPrint('📍 fallback last-known ${last.latitude}, ${last.longitude}');
+          debugPrint(
+              '📍 fallback last-known ${last.latitude}, ${last.longitude}');
           return LatLng(last.latitude, last.longitude);
         }
       } catch (_) {}
@@ -248,14 +243,21 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     _showSnack('Please fix the highlighted fields');
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // SUBMIT
+  //   • Sender location is ALWAYS required.
+  //   • Receiver location is required ONLY when the link switch is OFF.
+  //   • Receiver name is optional; phone is required.
+  // ═══════════════════════════════════════════════════════════════
   void _submit() {
+    // 1. Field validation
     if (!(_formKey.currentState?.validate() ?? false)) {
       _scrollToFirstError();
       HapticFeedback.mediumImpact();
       return;
     }
 
-    // Sender location required
+    // 2. Sender location is always required
     if (_senderLocation.value == null) {
       HapticFeedback.mediumImpact();
       _scrollToFirstError();
@@ -263,11 +265,14 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
       return;
     }
 
-    // Receiver location required
-    if (_receiverLocation.value == null) {
+    // 3. Receiver location is required ONLY when NOT sending a link
+    final requiresReceiverLocation = !_sendReceiverLink;
+    if (requiresReceiverLocation && _receiverLocation.value == null) {
       HapticFeedback.mediumImpact();
       _scrollToFirstError();
-      _showSnack('Please pick the receiver location on the map');
+      _showSnack(
+        'Pick the receiver location, or turn on "Receiver confirms location via link".',
+      );
       return;
     }
 
@@ -275,7 +280,7 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     HapticFeedback.selectionClick();
 
     final senderLoc = _senderLocation.value!;
-    final receiverLoc = _receiverLocation.value!;
+    final receiverLoc = _receiverLocation.value; // may be null
 
     final sender = OrderParty(
       name: _senderName.text.trim(),
@@ -288,15 +293,15 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
     );
 
     final receiver = OrderParty(
-      name: _receiverName.text.trim().isEmpty
-          ? null
-          : _receiverName.text.trim(),
+      name:
+          _receiverName.text.trim().isEmpty ? null : _receiverName.text.trim(),
       phone: _receiverPhone.text.trim(),
       address: _receiverAddress.text.trim().isEmpty
           ? null
           : _receiverAddress.text.trim(),
-      lat: receiverLoc.latitude,
-      lng: receiverLoc.longitude,
+      // null when the receiver must confirm via link
+      lat: receiverLoc?.latitude,
+      lng: receiverLoc?.longitude,
     );
 
     final items = _items.map((i) => i.toOrderItem()).toList();
@@ -436,11 +441,38 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                             onChanged: _markDirty,
                           ),
                           const SizedBox(height: 12),
+
+                          // ── Receiver location source: self-pick or link ──
+                          Card(
+                            margin: EdgeInsets.zero,
+                            elevation: 0,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
+                            child: SwitchListTile(
+                              value: _sendReceiverLink,
+                              onChanged: submitting
+                                  ? null
+                                  : (v) => setState(() {
+                                        _sendReceiverLink = v;
+                                        _dirty = true;
+                                      }),
+                              title: const Text(
+                                  'Receiver confirms location via link'),
+                              subtitle: const Text(
+                                'When ON, we SMS the receiver a link so they share their GPS.',
+                              ),
+                              secondary: const Icon(Icons.link),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+
                           _LocationRow(
                             location: _receiverLocation,
                             detecting: false,
                             enabled: !submitting,
                             title: 'Receiver location',
+                            optional: _sendReceiverLink, // ← dynamic
                             onPick: () => _openMapPicker(
                               target: _receiverLocation,
                               addressCtl: _receiverAddress,
@@ -512,8 +544,8 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                       TextFormField(
                         controller: _codAmount,
                         enabled: !submitting,
-                        keyboardType:
-                            const TextInputType.numberWithOptions(decimal: true),
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
                         inputFormatters: [
                           FilteringTextInputFormatter.allow(
                               RegExp(r'^\d*\.?\d{0,2}')),
@@ -532,27 +564,6 @@ class _CreateOrderViewState extends State<_CreateOrderView> {
                         },
                       ),
                     ],
-                    const SizedBox(height: 20),
-
-                    // ── Options ──
-                    _Section(
-                      icon: Icons.tune,
-                      title: 'Options',
-                      child: SwitchListTile(
-                        value: _sendReceiverLink,
-                        onChanged: submitting
-                            ? null
-                            : (v) => setState(() {
-                                  _sendReceiverLink = v;
-                                  _dirty = true;
-                                }),
-                        title: const Text('Send receiver a location link'),
-                        subtitle: const Text(
-                          'The receiver confirms GPS before pickup',
-                        ),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -694,6 +705,7 @@ class _LocationRow extends StatelessWidget {
     required this.enabled,
     required this.title,
     required this.onPick,
+    this.optional = false,
   });
 
   final ValueNotifier<LatLng?> location;
@@ -701,6 +713,7 @@ class _LocationRow extends StatelessWidget {
   final bool enabled;
   final String title;
   final VoidCallback onPick;
+  final bool optional;
 
   @override
   Widget build(BuildContext context) {
@@ -710,6 +723,7 @@ class _LocationRow extends StatelessWidget {
       builder: (context, latLng, _) {
         final has = latLng != null;
         final showDetecting = !has && detecting;
+        final requiredMark = optional ? '' : ' *';
 
         return InkWell(
           onTap: enabled ? onPick : null,
@@ -746,7 +760,7 @@ class _LocationRow extends StatelessWidget {
                             ? 'Detecting $title…'
                             : has
                                 ? '$title set'
-                                : 'Pick $title on map *',
+                                : 'Pick $title on map$requiredMark',
                         style: TextStyle(
                           fontWeight: has ? FontWeight.w700 : FontWeight.w500,
                           fontSize: 14,
@@ -757,8 +771,10 @@ class _LocationRow extends StatelessWidget {
                         has
                             ? '${latLng!.latitude.toStringAsFixed(5)}, ${latLng.longitude.toStringAsFixed(5)}'
                             : showDetecting
-                                ? 'Using your phone’s GPS'
-                                : 'Required for accurate pricing & delivery',
+                                ? 'Using your phone\'s GPS'
+                                : optional
+                                    ? 'Optional — the receiver confirms via link'
+                                    : 'Required for accurate pricing & delivery',
                         style: const TextStyle(
                             fontSize: 12, color: Colors.black54),
                         maxLines: 1,
@@ -812,8 +828,7 @@ class _Section extends StatelessWidget {
                 color: scheme.primaryContainer,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Icon(icon,
-                  size: 18, color: scheme.onPrimaryContainer),
+              child: Icon(icon, size: 18, color: scheme.onPrimaryContainer),
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -955,8 +970,8 @@ class _ItemCard extends StatelessWidget {
                     child: TextFormField(
                       controller: form.weightKg,
                       enabled: enabled,
-                      keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
                       textInputAction: TextInputAction.next,
                       inputFormatters: [
                         FilteringTextInputFormatter.allow(
@@ -984,18 +999,14 @@ class _ItemCard extends StatelessWidget {
                 ),
                 items: const [
                   DropdownMenuItem(value: 'PARCEL', child: Text('Parcel')),
-                  DropdownMenuItem(
-                      value: 'DOCUMENT', child: Text('Document')),
+                  DropdownMenuItem(value: 'DOCUMENT', child: Text('Document')),
                   DropdownMenuItem(value: 'BOX', child: Text('Box')),
-                  DropdownMenuItem(
-                      value: 'ENVELOPE', child: Text('Envelope')),
+                  DropdownMenuItem(value: 'ENVELOPE', child: Text('Envelope')),
                   DropdownMenuItem(value: 'FOOD', child: Text('Food')),
                   DropdownMenuItem(
                       value: 'ELECTRONICS', child: Text('Electronics')),
-                  DropdownMenuItem(
-                      value: 'CLOTHING', child: Text('Clothing')),
-                  DropdownMenuItem(
-                      value: 'MEDICINE', child: Text('Medicine')),
+                  DropdownMenuItem(value: 'CLOTHING', child: Text('Clothing')),
+                  DropdownMenuItem(value: 'MEDICINE', child: Text('Medicine')),
                   DropdownMenuItem(
                       value: 'FRAGILE_ITEM', child: Text('Fragile item')),
                   DropdownMenuItem(value: 'OTHER', child: Text('Other')),
