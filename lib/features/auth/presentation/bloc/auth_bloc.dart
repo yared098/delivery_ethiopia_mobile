@@ -4,6 +4,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../../core/notifications/device_token_service.dart';
 import '../../../../core/notifications/push_service.dart';
+import '../../../../core/storage/secure_storage.dart';
 import '../../../../di/service_locator.dart';
 import '../../domain/usecases/get_me.dart';
 import '../../domain/usecases/logout.dart';
@@ -35,7 +36,6 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   final GetMe getMe;
   final Logout logout;
 
-  // 🛑 Guard against re-entry
   bool _isLoggingOut = false;
 
   // ══════════════════════════════════════════════════
@@ -118,12 +118,20 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   }
 
   // ══════════════════════════════════════════════════
-  // REFRESH ME
+  // REFRESH ME — preserve stored kind  👈 FIXED
   // ══════════════════════════════════════════════════
   Future<void> _onRefreshMe(RefreshMeEvent e, Emitter<AuthState> emit) async {
     if (_isLoggingOut) return;
 
-    final res = await getMe();
+    // Which account is this device logged in as?
+    AccountKind kind = AccountKind.customer;
+    if (sl.isRegistered<SecureStorage>()) {
+      kind =
+          await sl<SecureStorage>().readAccountKind() ?? AccountKind.customer;
+    }
+
+    final res = await getMe(); // repository routes by kind internally
+
     await res.fold(
       (l) async {
         if (l.statusCode == 401 && !_isLoggingOut) {
@@ -131,7 +139,14 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         }
       },
       (account) async {
-        emit(AuthAuthenticated(account, AccountKind.customer));
+        if (sl.isRegistered<DeviceTokenService>()) {
+          sl<DeviceTokenService>().setAccount(
+            kind == AccountKind.courier
+                ? DeviceAccount.courier
+                : DeviceAccount.customer,
+          );
+        }
+        emit(AuthAuthenticated(account, kind)); // 👈 preserve kind
         await _uploadFcmToken();
       },
     );
@@ -141,7 +156,6 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   // LOGOUT — RE-ENTRY GUARDED
   // ══════════════════════════════════════════════════
   Future<void> _onLogout(LogoutEvent e, Emitter<AuthState> emit) async {
-    // 🛑 STOP THE LOOP — ignore duplicate logout events
     if (_isLoggingOut) {
       if (kDebugMode) debugPrint('🔔 logout already in progress — ignored');
       return;
@@ -152,7 +166,6 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     push?.setLoggingOut(true);
 
     try {
-      // 1. Detach server-side token while we still have auth
       if (push != null && sl.isRegistered<DeviceTokenService>()) {
         final token = await push.getToken();
         if (token != null && token.isNotEmpty) {
@@ -160,10 +173,8 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         }
       }
 
-      // 2. Clear local auth (stops all future uploads)
-      await logout();
+      await logout(); // wipes SecureStorage (incl. account_kind)
 
-      // 3. Delete FCM token (guarded)
       await push?.deleteToken();
     } catch (err) {
       if (kDebugMode) debugPrint('🔔 logout error: $err');
